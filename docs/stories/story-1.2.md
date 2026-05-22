@@ -1,0 +1,145 @@
+# Story 1.2: Database schema and migrations
+
+**Epic:** Foundation
+**Status:** Review
+**Estimate:** M (3-4 days)
+**Depends on:** 1.1 (Repo scaffold)
+**Blocks:** 1.4 (Commission engine), all API stories
+
+## Context
+
+Defines the full data model for v1, even though only a subset will have UI in v1. Reason: the engine handles clawbacks, overrides, and adjustments in v1 (per business logic), but admin UIs for those features ship in v1.1+. The schema must support everything from day one so we don't migrate later.
+
+Full entity definitions, types, and constraints live in `docs/architecture.md` section "Data model (7 entities)". This story implements that doc — if the doc and this story disagree, the doc wins. Devs should re-read it before starting.
+
+Critical engine concern: `commission_events` is an immutable ledger. Status is the only field that can change after insert. Schema must enforce this via DB-level constraints where possible.
+
+## User-facing change
+
+None. Internal infrastructure.
+
+## Acceptance criteria
+
+- Drizzle ORM installed in `/apps/api`. Schema lives in `/apps/api/src/db/schema/`, one file per entity (`plans.ts`, `assignments.ts`, etc.) plus `index.ts` re-exporting everything.
+- Migrations are managed by drizzle-kit. `pnpm --filter api db:generate` produces SQL migrations in `/db/migrations/`. `pnpm --filter api db:migrate` applies them.
+- Initial migration creates all 7 tables plus `audit_log`, with all constraints, indexes, and enums from the architecture doc.
+- All `id` columns are `uuid` with `gen_random_uuid()` default.
+- All timestamp columns are `timestamptz`, default `now()` where applicable.
+- All money columns are `numeric(12,2)`. All percent columns are `numeric(5,2)`.
+- Foreign keys are enforced. `on delete cascade` only where the parent entity owns the child (`plan_assignments → commission_plans` cascades; `commission_events → commission_plans` does NOT cascade, since deleting a plan must not orphan or destroy events).
+- `commission_events` has a unique constraint on `(triggering_stage_transition_id, user_id, event_type)` for idempotency. NULL `triggering_stage_transition_id` values do not collide (Postgres default NULL behavior is fine).
+- `commission_events` has a row-level CHECK constraint preventing edits to all columns except `status` (use a trigger or column-level immutability).
+- `commission_plans.clawback_config` is a `jsonb` column; defaults to `null`. Schema doc clarifies the shape `{ enabled: boolean, cancellation_stages: string[], clawback_percent: number, grace_period_days: number }`.
+- `commission_plans` has a constraint that `effective_to` is null OR > `effective_from`.
+- `commission_plans` has a unique partial index on `(org_id, name)` where `is_active = true` — only one active plan with a given name per org.
+- `plan_assignments` has a constraint preventing overlapping date ranges for the same `(plan_id, user_id, role)`. Use a Postgres exclusion constraint with `tstzrange` and `&&` operator.
+- `audit_log` table exists with: `id`, `org_id`, `actor_user_id`, `entity_type`, `entity_id`, `action`, `before` (jsonb), `after` (jsonb), `created_at`.
+- All tables have an `org_id` column where applicable, with a non-null constraint and an index.
+- A seed script at `/apps/api/src/db/seed.ts` creates: 1 org, 3 users (admin, closer, setter), 2 plans (one `percent_contract` at 3%, one `ppw` at $0.15/W, one with clawbacks enabled, one without), 5 sample projects across different pipeline stages, plan assignments connecting users to plans.
+- `pnpm --filter api db:seed` runs the seed script idempotently (clears existing data first if a `--reset` flag is passed).
+- TypeScript types are exported from `/packages/shared/src/db-types.ts` (inferred via Drizzle's `$inferSelect` / `$inferInsert`) so frontend and engine code share the same types.
+- README has a "Database" section explaining: how to reset, how to generate migrations, how to seed, where the schema lives.
+
+## Implementation notes
+
+- Use `drizzle-orm` and `drizzle-kit` latest.
+- Postgres 16 in docker-compose.
+- For the immutability trigger on `commission_events`, write a Postgres trigger function that fires `BEFORE UPDATE` and raises an exception if any column other than `status` changes. This is more enforceable than relying on app-layer discipline.
+- For exclusion constraints, you'll need `CREATE EXTENSION btree_gist;` — add it to the initial migration.
+- Don't put business logic in the seed file beyond what's needed to bring the DB to a usable state. Engine testing has its own fixtures (Story 1.4).
+- Do NOT use Drizzle's `relations` API for now. Keep the schema flat; we'll add relations selectively when query stories need them. Reasoning: relations bloat type inference and slow tsc.
+- For enums, use Postgres native enums (Drizzle's `pgEnum`), not strings with CHECK constraints. Easier to evolve.
+- Indexes to create (per architecture doc, plus): `commission_events(org_id, user_id, created_at desc)` for the dashboard query, `commission_events(project_id, event_type)` for project panel queries.
+
+## Files to create
+
+- `/apps/api/drizzle.config.ts`
+- `/apps/api/src/db/index.ts` (connection)
+- `/apps/api/src/db/schema/plans.ts`
+- `/apps/api/src/db/schema/assignments.ts`
+- `/apps/api/src/db/schema/projects.ts`
+- `/apps/api/src/db/schema/events.ts`
+- `/apps/api/src/db/schema/adjustments.ts`
+- `/apps/api/src/db/schema/overrides.ts`
+- `/apps/api/src/db/schema/statements.ts`
+- `/apps/api/src/db/schema/audit.ts`
+- `/apps/api/src/db/schema/index.ts`
+- `/apps/api/src/db/seed.ts`
+- `/db/migrations/0000_initial.sql` (generated)
+- `/packages/shared/src/db-types.ts`
+
+## Edge cases the schema must encode
+
+These map to the engine edge cases in `docs/prd.md` section 6:
+
+- Plan version transitions handled by `effective_from`/`effective_to` ranges, not "current version" flags.
+- Duplicate webhooks blocked at DB level via unique constraint on `(triggering_stage_transition_id, user_id, event_type)`.
+- Clawback as a per-plan opt-in via `clawback_config.enabled`.
+- Org-level `require_event_approval`: add to the seed for the org table as a `settings` jsonb column (`{ require_event_approval: boolean }`).
+- Multi-org isolation via `org_id` on every table (API-layer filtering will enforce; DB stores).
+
+## QA gate
+
+QA agent verifies:
+1. Fresh DB + migrate + seed yields the expected row counts and a working test fixture.
+2. Attempting to UPDATE a column other than `status` on `commission_events` raises a Postgres exception.
+3. Inserting a second `plan_assignments` row with overlapping dates for the same `(plan_id, user_id, role)` fails.
+4. Inserting two `commission_events` with the same `triggering_stage_transition_id` + `user_id` + `event_type` fails.
+5. Inserting a `commission_plans` row with `effective_to <= effective_from` fails.
+6. Drizzle types in `/packages/shared/src/db-types.ts` compile and are importable from `/apps/web` without runtime SQL deps.
+7. `pnpm --filter api db:migrate` is idempotent — running twice does nothing the second time.
+
+## Dev Agent Record
+
+### Implementation Plan
+- Schema in /apps/api/src/db/schema/ — one file per entity, re-exported from index.ts
+- Enums as Postgres native pgEnum
+- Custom DDL appended to generated migration: btree_gist extension, commission_events immutability trigger, plan_assignments exclusion constraint, commission_plans partial unique index
+- Shared types manually written in /packages/shared/src/db-types.ts (no runtime drizzle-orm dep in shared)
+- Seed uses fixed UUIDs for idempotency (ON CONFLICT DO NOTHING)
+- orgs.ts added to schema (not in story file list but required by seed)
+
+### Debug Log
+- Top-level `await` in migrate.ts and seed.ts failed under tsx (CJS output format). Fixed by wrapping in `async function main()`.
+- Local Postgres on port 5432 intercepted connections instead of Docker's container. Fixed by changing docker-compose to expose DB on port 5433 externally.
+- Drizzle migration journal (`__drizzle_migrations`) wasn't populated after manual `psql` apply. Fixed by manually inserting the migration hash into `drizzle.__drizzle_migrations`.
+- FK constraint name `project_commission_configs_plan_override_id_commission_plans_id_fk` exceeded 63-char Postgres limit — Postgres auto-truncated (NOTICE). No action needed.
+
+### Completion Notes
+- 9 Drizzle schema files + index.ts created; all 9 tables created in DB
+- All enums as Postgres native `pgEnum`
+- Custom DDL appended to generated migration: `btree_gist` extension, `plans_effective_dates_check` CHECK constraint, `prevent_commission_event_update` trigger + `enforce_commission_event_immutability` trigger, `plan_assignments_no_overlap` exclusion constraint
+- Partial unique index `idx_plans_active_name` generated correctly by Drizzle
+- `db:migrate` is idempotent (QA gate 7 verified)
+- `db:seed` is idempotent via `onConflictDoNothing()` with fixed UUIDs
+- All 5 DB QA gates pass: immutability trigger, exclusion constraint, idempotency unique, dates check constraint, row counts
+- Shared types in `/packages/shared/src/db-types.ts` — pure TypeScript, no drizzle-orm runtime dep; web builds cleanly importing from shared
+- `pnpm build` and `pnpm lint` clean after all changes
+
+### File List
+- `apps/api/package.json` (updated: added drizzle-orm, drizzle-kit, postgres; db scripts)
+- `apps/api/drizzle.config.ts`
+- `apps/api/src/db/index.ts`
+- `apps/api/src/db/migrate.ts`
+- `apps/api/src/db/seed.ts`
+- `apps/api/src/db/schema/orgs.ts`
+- `apps/api/src/db/schema/plans.ts`
+- `apps/api/src/db/schema/assignments.ts`
+- `apps/api/src/db/schema/projects.ts`
+- `apps/api/src/db/schema/events.ts`
+- `apps/api/src/db/schema/adjustments.ts`
+- `apps/api/src/db/schema/overrides.ts`
+- `apps/api/src/db/schema/statements.ts`
+- `apps/api/src/db/schema/audit.ts`
+- `apps/api/src/db/schema/index.ts`
+- `db/migrations/0000_wooden_rawhide_kid.sql` (generated + custom DDL appended)
+- `db/migrations/meta/_journal.json` (generated)
+- `packages/shared/src/db-types.ts`
+- `packages/shared/src/index.ts` (updated: exports db-types)
+- `docker-compose.yml` (updated: DB port 5433, web port 5173:80)
+- `.env.example` (updated: port 5433 note)
+- `README.md` (updated: Database section added)
+
+## Handoff to next story
+
+Story 1.3 (auth + org-scoping middleware) builds on this. Story 1.4 (commission engine) is where the schema starts paying off — the engine reads and writes through Drizzle and relies heavily on the ledger immutability.
