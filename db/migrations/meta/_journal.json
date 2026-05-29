@@ -36,6 +36,13 @@
       "when": 1779477146877,
       "tag": "0004_futuristic_stellaris",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779483623256,
+      "tag": "0005_docuseal_workflow_triggers",
+      "breakpoints": true
     }
   ]
 }

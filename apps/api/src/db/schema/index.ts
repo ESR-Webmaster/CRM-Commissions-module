@@ -8,4 +8,3 @@ export * from './adjustments';
 export * from './overrides';
 export * from './statements';
 export * from './audit';
-export * from './docuseal';

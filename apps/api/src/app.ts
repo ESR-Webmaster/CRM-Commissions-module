@@ -16,10 +16,6 @@ import { createAdjustmentsRouter } from './routes/adjustments';
 import { createOverrideRulesRouter } from './routes/overrideRules';
 import { createDevTokenRouter } from './routes/devToken';
 import { createHealthRouter, createMetricsHandler } from './routes/health';
-import { createDocusealConfigRouter } from './routes/docuseal/config';
-import { createDocusealTemplatesRouter } from './routes/docuseal/templates';
-import { createDocusealSubmissionsRouter } from './routes/docuseal/submissions';
-import { createDocusealBulkSendRouter } from './routes/docuseal/bulkSend';
 import { httpRequestsTotal, httpRequestDurationMs } from './lib/metrics';
 
 export function buildApp(opts: { rateLimitMax?: number; rateLimitWindowMs?: number; signingKey?: string } = {}): Express {
@@ -71,10 +67,6 @@ export function buildApp(opts: { rateLimitMax?: number; rateLimitWindowMs?: numb
   app.use('/api/v1/audit', createAuditRouter(db));
   app.use('/api/v1/adjustments', createAdjustmentsRouter(db));
   app.use('/api/v1/override-rules', createOverrideRulesRouter(db));
-  app.use('/api/v1/docuseal/config', createDocusealConfigRouter(db));
-  app.use('/api/v1/docuseal/templates', createDocusealTemplatesRouter(db));
-  app.use('/api/v1/docuseal/submissions', createDocusealSubmissionsRouter(db));
-  app.use('/api/v1/docuseal/bulk-send', createDocusealBulkSendRouter(db));
 
   return app;
 }

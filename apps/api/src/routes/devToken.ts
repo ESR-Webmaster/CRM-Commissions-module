@@ -13,6 +13,7 @@ export function createDevTokenRouter(db: Db, signingKey: string): Router {
   // Blocked entirely in production.
   router.post('/', async (req, res): Promise<void> => {
     const role = req.body?.role === 'rep' ? 'rep' : 'admin';
+    const requestedUserId = typeof req.body?.user_id === 'string' ? req.body.user_id : null;
 
     let [org] = await db
       .select({ id: orgs.id, name: orgs.name })
@@ -32,7 +33,7 @@ export function createDevTokenRouter(db: Db, signingKey: string): Router {
       return;
     }
 
-    const userId = randomUUID();
+    const userId = requestedUserId ?? randomUUID();
     const token = jwt.sign(
       { org_id: org.id, user_id: userId, role },
       signingKey,
